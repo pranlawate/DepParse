@@ -1,0 +1,43 @@
+Updating Subscription Management repositories.
+
+Problem 1: problem with installed package python3-pip-9.0.3-20.el8.noarch
+  - cannot install the best update candidate for package python3-pip-9.0.3-20.el8.noarch
+  - nothing provides platform-python-pip = 9.0.3-22.el8 needed by python3-pip-9.0.3-22.el8.noarch
+ Problem 2: problem with installed package clevis-15-1.el8_5.1.x86_64
+  - cannot install the best update candidate for package clevis-15-1.el8_5.1.x86_64
+  - nothing provides libjansson.so.4(libjansson.so.4)(64bit) needed by clevis-15-8.el8.x86_64
+ Problem 3: problem with installed package bind-libs-lite-32:9.11.26-6.el8.x86_64
+  - cannot install the best update candidate for package bind-libs-lite-32:9.11.26-6.el8.x86_64
+  - nothing provides libjson-c.so.4(JSONC_0.14)(64bit) needed by bind-libs-lite-32:9.11.36-3.el8.x86_64
+ Problem 4: problem with installed package clevis-luks-15-1.el8_5.1.x86_64
+  - cannot install the best update candidate for package clevis-luks-15-1.el8_5.1.x86_64
+  - package clevis-luks-15-8.el8.x86_64 requires clevis(x86-64) = 15-8.el8, but none of the providers can be installed
+  - nothing provides libjansson.so.4(libjansson.so.4)(64bit) needed by clevis-15-8.el8.x86_64
+ Problem 5: problem with installed package bind-utils-32:9.11.26-6.el8.x86_64
+  - cannot install the best update candidate for package bind-utils-32:9.11.26-6.el8.x86_64
+  - package bind-utils-32:9.11.36-3.el8.x86_64 requires bind-libs-lite(x86-64) = 32:9.11.36-3.el8, but none of the providers can be installed
+  - package bind-utils-32:9.11.36-3.el8.x86_64 requires libdns.so.1115()(64bit), but none of the providers can be installed
+  - nothing provides libjson-c.so.4(JSONC_0.14)(64bit) needed by bind-libs-lite-32:9.11.36-3.el8.x86_64
+ Problem 6: problem with installed package bind-libs-32:9.11.26-6.el8.x86_64
+  - cannot install the best update candidate for package bind-libs-32:9.11.26-6.el8.x86_64
+  - package bind-libs-32:9.11.36-3.el8.x86_64 requires bind-libs-lite(x86-64) = 32:9.11.36-3.el8, but none of the providers can be installed
+  - package bind-libs-32:9.11.36-3.el8.x86_64 requires libdns.so.1115()(64bit), but none of the providers can be installed
+  - nothing provides libjson-c.so.4(JSONC_0.14)(64bit) needed by bind-libs-lite-32:9.11.36-3.el8.x86_64
+=============================================================================================================================================================================================================================================
+ Package                                             Architecture                                Version                                               Repository                                                                       Size
+=============================================================================================================================================================================================================================================
+Skipping packages with broken dependencies:
+ bind-libs                                           x86_64                                      32:9.11.36-3.el8                                      rhui-rhel-8-for-x86_64-appstream-rhui-rpms                                      175 k
+ bind-libs-lite                                      x86_64                                      32:9.11.36-3.el8                                      rhui-rhel-8-for-x86_64-appstream-rhui-rpms                                      1.2 M
+ bind-utils                                          x86_64                                      32:9.11.36-3.el8                                      rhui-rhel-8-for-x86_64-appstream-rhui-rpms                                      451 k
+ clevis                                              x86_64                                      15-8.el8                                              rhui-rhel-8-for-x86_64-appstream-rhui-rpms                                       58 k
+ clevis-luks                                         x86_64                                      15-8.el8                                              rhui-rhel-8-for-x86_64-appstream-rhui-rpms                                       38 k
+ python3-pip                                         noarch                                      9.0.3-22.el8                                          rhui-rhel-8-for-x86_64-appstream-rhui-rpms                                       20 k
+
+Transaction Summary
+=============================================================================================================================================================================================================================================
+Skip  6 Packages
+
+Nothing to do.
+Complete!
+
