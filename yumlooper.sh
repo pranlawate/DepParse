@@ -46,8 +46,11 @@ then
         echo "====================="
         echo "Runnnig yum list for the missing deps"
         echo ""
-        yum list $(yum whatprovides $(cat depd.prn | sort -u) | awk -F. '/.el8./{print $1}' | awk 'BEGIN{FS=OFS="-"}{NF--;print}'| grep -v 'Provide'| sort -u) 
-
+#       yum list $(yum whatprovides $(cat depd.prn | sort -u) | awk -F. '/.el8./{print $1}' | awk 'BEGIN{FS=OFS="-"}{NF--;print}'| grep -v 'Provide'| sort -u) 
+# I modified /.el8./ to /.el8/ since it's loosing el8_5 and similar ones.
+# I also plan to add egrep to loose lines with 'Repo,Matched, Provide and Filename
+# I have found filename parser that works better than <awk 'BEGIN{FS=OFS="-"}{NF--;print}'> 
+	yum list $(yum whatprovides $(cat depd.prn | sort -u) | egrep -v "^Repo|^Matched|^Provide|^Filename" | awk -F. '/.el8/{print $1}' | sed 's:-[0-9].*::'  | sort -u)
     else 
         echo "No Deps failed, file empty" 
     fi
