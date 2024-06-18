@@ -1,4 +1,10 @@
 #!/bin/bash
+
+if  [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+	echo "Usage: sh `basename $0` OR ./yumlooper.sh"
+	exit 0
+fi
+
 echo "-----------------------"
 echo "Parsing the yumlog.txt"
 echo "-----------------------"
@@ -32,7 +38,8 @@ done < yumlog.txt
   echo "Failed packages list"
   echo ""
   #  echo "`cat failpkg.prn`"
-  echo "`cat failpkg.prn | awk 'BEGIN {RS="--"; FS="\n";} { print $2 "\t\tfails update because\t" $3 "\t\tdoesnt have deps fullfilled";}'`"
+  #  echo "`cat failpkg.prn | awk 'BEGIN {RS="--"; FS="\n";} { print $2 "\t\tfails update because\t" $3 "\t\tdoesnt have deps fullfilled";}'`"
+  echo "`cat failpkg.prn | awk 'BEGIN {RS="--"; FS="\n";} { print $2 " fails update because dependencies of version " $3 " are not fullfilled";}'`"
   echo "=========="
 
 if [ -f depd.prn ]
