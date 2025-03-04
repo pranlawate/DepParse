@@ -51,7 +51,7 @@ then
         echo ""
         echo "`cat depd.prn | sort -u`"
         echo "====================="
-        echo "Runnnig yum list for the missing deps"
+        echo "Running yum list for the missing deps"
         echo ""
 #       yum list $(yum whatprovides $(cat depd.prn | sort -u) | awk -F. '/.el8./{print $1}' | awk 'BEGIN{FS=OFS="-"}{NF--;print}'| grep -v 'Provide'| sort -u) 
 # I modified /.el8./ to /.el8/ since it's loosing el8_5 and similar ones.
