@@ -4,23 +4,31 @@ if  [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
 	echo "DepParse - YUM/DNF Dependency Error Analyzer"
 	echo "============================================="
 	echo ""
-	echo "Usage: ./yumlooper.sh [OPTIONS]"
+	echo "Usage: ./yumlooper.sh [OPTIONS] [LOGFILE]"
 	echo ""
 	echo "This tool analyzes yum/dnf dependency errors and provides troubleshooting guidance."
 	echo ""
 	echo "Steps:"
 	echo "  1. Get the dependency error from customer: dnf update 2>&1 | tee yumlog.txt"
-	echo "  2. Run: ./yumlooper.sh"
+	echo "  2. Run: ./yumlooper.sh [logfile]"
 	echo "  3. Script analyzes the error and shows commands to run for diagnosis"
 	echo "  4. Send those commands to customer, get output, and re-analyze"
+	echo ""
+	echo "Arguments:"
+	echo "  LOGFILE             Path to yum/dnf log file (default: yumlog.txt)"
 	echo ""
 	echo "Options:"
 	echo "  -h, --help          Show this help message"
 	echo "  -v, --verbose       Verbose output (reserved for future use)"
 	echo "  --run-queries       Run yum/dnf queries on THIS server (default: analyze only)"
 	echo ""
+	echo "Examples:"
+	echo "  ./yumlooper.sh                        # reads yumlog.txt in current dir"
+	echo "  ./yumlooper.sh /tmp/customer_log.txt   # reads specified file"
+	echo "  ./yumlooper.sh mylog.txt --run-queries # reads mylog.txt + queries repos"
+	echo ""
 	echo "Default Behavior (no options):"
-	echo "  - Analyzes yumlog.txt"
+	echo "  - Analyzes the log file (yumlog.txt or specified file)"
 	echo "  - Shows blocking chain and issue type"
 	echo "  - Lists commands for customer to run for further diagnosis"
 	echo "  - Suggests possible solutions"
@@ -31,6 +39,14 @@ if  [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
 	echo "  - Provides specific installation commands"
 	echo "  - Use ONLY if analyzing errors on the same server"
 	echo ""
+	echo "Supported Error Patterns:"
+	echo "  - 'nothing provides' (missing dependency)"
+	echo "  - 'problem with installed package'"
+	echo "  - 'cannot install both' (version conflict)"
+	echo "  - 'cannot install the best update candidate'"
+	echo "  - 'does not belong to a distupgrade repository'"
+	echo "  - 'obsoletes' relationships"
+	echo ""
 	echo "Output:"
 	echo "  - Screen: Analysis summary and next steps"
 	echo "  - File: depparse_analysis.log (comprehensive analysis)"
@@ -40,26 +56,29 @@ fi
 
 VERBOSE=0
 RUN_QUERIES=0
+LOGFILE="yumlog.txt"
 
 # Parse arguments
 for arg in "$@"; do
     case $arg in
         -v|--verbose)
             VERBOSE=1
-            shift
             ;;
         --run-queries)
             RUN_QUERIES=1
-            shift
             ;;
         -n|--no-repo)
-            # Legacy option - kept for backwards compatibility
             echo "Note: -n/--no-repo is deprecated. Analysis-only is now the default."
             echo "      Use --run-queries to run repository queries."
             echo ""
-            shift
+            ;;
+        -*)
+            echo "Unknown option: $arg"
+            echo "Use -h or --help for usage."
+            exit 1
             ;;
         *)
+            LOGFILE="$arg"
             ;;
     esac
 done
@@ -76,23 +95,24 @@ else
     echo ""
 fi
 
-echo "Step 1: Parsing yumlog.txt..."
+echo "Step 1: Parsing $LOGFILE..."
 
 # Check if input file exists
-if [ ! -f "yumlog.txt" ]; then
+if [ ! -f "$LOGFILE" ]; then
     echo ""
-    echo "ERROR: yumlog.txt not found!"
+    echo "ERROR: $LOGFILE not found!"
     echo ""
-    echo "Please create a file named 'yumlog.txt' with your yum/dnf error output."
-    echo "Example: yum update 2>&1 | tee yumlog.txt"
+    echo "Usage: ./yumlooper.sh [OPTIONS] [LOGFILE]"
+    echo "Default logfile: yumlog.txt"
+    echo "Example: dnf update 2>&1 | tee yumlog.txt"
     echo ""
     exit 1
 fi
 
 # Check if input file is empty
-if [ ! -s "yumlog.txt" ]; then
+if [ ! -s "$LOGFILE" ]; then
     echo ""
-    echo "ERROR: yumlog.txt is empty!"
+    echo "ERROR: $LOGFILE is empty!"
     echo ""
     echo "Please ensure the file contains yum/dnf error output."
     echo ""
@@ -110,6 +130,7 @@ TEMP_CONFLICTS=$(mktemp)      # Version conflicts (cannot install both)
 TEMP_BLOCKERS=$(mktemp)       # Blocked updates (cannot install best candidate)
 TEMP_OBSOLETES=$(mktemp)      # Obsoletes relationships
 TEMP_MODULAR=$(mktemp)        # Modular package names
+TEMP_DISTUPGRADE=$(mktemp)    # Packages blocked by distupgrade repo check
 TEMP_TREE_DATA=$(mktemp)      # Per-problem structured data for tree display
 
 PROBLEM_NUM=0
@@ -143,7 +164,7 @@ cat >> "$ANALYSIS_LOG" << EOF
                     DEPENDENCY ANALYSIS REPORT
 ================================================================================
 Generated: $(date)
-Source: yumlog.txt
+Source: $LOGFILE
 
 EOF
 
@@ -162,6 +183,14 @@ while read line; do
            ROOT_SRC=$(awk '{for(i=1;i<=NF;i++) if($i=="package") {for(j=i+2;j<=NF;j++) if($j=="from") {print $(j+1); break}; break}}' <<< "$line")
            CURRENT_ROOT_BASE=$(echo "$ROOT_PKG" | sed 's/\.\(noarch\|x86_64\|i686\)$//')
            echo "P|$PROBLEM_NUM|ROOT|$ROOT_PKG|$ROOT_SRC" >> "$TEMP_TREE_DATA"
+
+           # Chain tracking: root package needs its requirement
+           ROOT_BASE=$(echo "$ROOT_PKG" | sed 's/-[0-9].*//')
+           ROOT_REQ_SYM=$(awk '{for(i=1;i<=NF;i++) if($i=="requires") {print $(i+1); break}}' <<< "$line")
+           ROOT_REQ_BASE=$(echo "$ROOT_REQ_SYM" | sed 's/[><=].*//')
+           if [ -n "$ROOT_BASE" ] && [ -n "$ROOT_REQ_BASE" ]; then
+               echo "P|$PROBLEM_NUM|NEEDS|$ROOT_BASE|$ROOT_REQ_BASE" >> "$TEMP_TREE_DATA"
+           fi
        fi
    fi
 
@@ -236,6 +265,15 @@ while read line; do
                BLOCKED_SRC=$(awk '{for(i=1;i<=NF;i++) if($i=="package") {for(j=i+2;j<=NF;j++) if($j=="from") {print $(j+1); break}; break}}' <<< "$line")
                echo "P|$PROBLEM_NUM|ROOT|$BLOCKED_PKG|$BLOCKED_SRC" >> "$TEMP_TREE_DATA"
            fi
+
+           # Chain tracking: record "X needs Y" edge
+           # Extract the requirer base name and what it requires
+           REQUIRER_BASE=$(echo "$BLOCKED_PKG" | sed 's/-[0-9].*//')
+           REQUIRED_SYM=$(awk '{for(i=1;i<=NF;i++) if($i=="requires") {print $(i+1); break}}' <<< "$line")
+           REQUIRED_BASE=$(echo "$REQUIRED_SYM" | sed 's/[><=].*//')
+           if [ -n "$REQUIRER_BASE" ] && [ -n "$REQUIRED_BASE" ]; then
+               echo "P|$PROBLEM_NUM|NEEDS|$REQUIRER_BASE|$REQUIRED_BASE" >> "$TEMP_TREE_DATA"
+           fi
        fi
        if [[ "$line" == *"module+el"* ]]; then
            IS_MODULAR=1
@@ -289,6 +327,15 @@ while read line; do
        }' <<< "$line" | sed "s/PNUM/$PROBLEM_NUM/" >> "$TEMP_TREE_DATA"
    fi
 
+   # Parse "does not belong to a distupgrade repository" - upgrade target mismatch
+   if [[ "$line" == *"does not belong to a distupgrade repository"* ]]; then
+       ISSUE_TYPE="filtered_dependency_gap"
+       pkg=$(echo "$line" | sed 's/^ *- *//' | awk '{print $1}')
+       repo=$(echo "$line" | grep -oP 'from \K\S+')
+       echo "$pkg|$repo" >> "$TEMP_DISTUPGRADE"
+       echo "P|$PROBLEM_NUM|DISTUPGRADE|$pkg|$repo" >> "$TEMP_TREE_DATA"
+   fi
+
    # Parse "cannot install the best update candidate" - blocked updates
    if [[ "$line" == *"cannot install the best update candidate"* ]]; then
        ISSUE_TYPE="blocked_update"
@@ -322,32 +369,139 @@ while read line; do
            }
        }' <<< "$line" >> "$TEMP_OBSOLETES"
    fi
-done < yumlog.txt
+done < "$LOGFILE"
 
-# Compute TRUE BLOCKERS vs HELD BACK packages
-# HOLDING_BACK = packages in BLOCKERS but NOT in CONFLICTS (no update available, pin old versions)
-# HELD_BACK = packages in CONFLICTS (have updates but can't install them)
-HOLDING_BACK_PKGS=""
-HELD_BACK_PKGS=""
-if [ -s "$TEMP_CONFLICTS" ] && [ -s "$TEMP_BLOCKERS" ]; then
-    CONFLICT_BASE=$(cat "$TEMP_CONFLICTS" | awk '{print $1, $3}' | tr ' ' '\n' | sed 's/-[0-9].*//' | sort -u)
-    BLOCKER_BASE=$(cat "$TEMP_BLOCKERS" | sed 's/-[0-9].*//' | sort -u)
+# ============================================================================
+# CHAIN ANALYSIS: trace dependency chains to find the REAL root cause
+# ============================================================================
+# DNF logs are inverted: they blame the top-level package when the real issue
+# is a dependency further down the chain that can't resolve. We trace the
+# chain to find the terminal failure (the actual root cause).
+#
+# Terminal failures (real root causes):
+#   - DISTUPGRADE: package outside the update scope (--security/--advisory/distro-sync)
+#   - MISSING: "nothing provides" - dependency not in any enabled repo
+#   - CONFLICT at end of chain: version clash at the bottom of the dep tree
+#
+# Installed blockers (genuinely pinning):
+#   - "problem with installed package" (ROOT source = @System)
+#   - These packages ARE the root cause: they're installed, have no update,
+#     and their version requirements hold back other packages
+#
+# Victims (NOT the root cause despite DNF blaming them):
+#   - "cannot install the best update candidate" packages that are NOT
+#     genuinely installed blockers - they WANT to update but can't because
+#     their dependency chain is broken somewhere downstream
+# ============================================================================
 
-    for bpkg in $BLOCKER_BASE; do
-        IS_IN_CONFLICT=0
-        for cpkg in $CONFLICT_BASE; do
-            if [ "$bpkg" = "$cpkg" ]; then
-                IS_IN_CONFLICT=1
-                break
-            fi
-        done
-        if [ "$IS_IN_CONFLICT" -eq 0 ]; then
-            [ -n "$HOLDING_BACK_PKGS" ] && HOLDING_BACK_PKGS="$HOLDING_BACK_PKGS "
-            HOLDING_BACK_PKGS="$HOLDING_BACK_PKGS$bpkg"
+# Collect genuinely installed blockers (from "problem with installed package")
+INSTALLED_BLOCKER_PKGS=""
+if [ -s "$TEMP_TREE_DATA" ]; then
+    INSTALLED_BLOCKER_PKGS=$(grep '|ROOT|.*|@System' "$TEMP_TREE_DATA" | cut -d'|' -f4 | sed 's/-[0-9].*//' | sort -u | tr '\n' ' ')
+fi
+
+# Collect terminal failure packages (the REAL root causes)
+TERMINAL_PKGS=""
+if [ -s "$TEMP_DISTUPGRADE" ]; then
+    TERMINAL_PKGS=$(awk -F'|' '{print $1}' "$TEMP_DISTUPGRADE" | sed 's/-[0-9].*//' | sort -u | tr '\n' ' ')
+fi
+if [ -s "$TEMP_DEPD" ]; then
+    # "nothing provides" - the missing dep symbols (may not be package names)
+    TERMINAL_PKGS="$TERMINAL_PKGS$(cat "$TEMP_DEPD" | sort -u | tr '\n' ' ')"
+fi
+
+# Collect packages from conflicts (at the end of chains)
+CONFLICT_PKGS_ALL=""
+if [ -s "$TEMP_CONFLICTS" ]; then
+    CONFLICT_PKGS_ALL=$(cat "$TEMP_CONFLICTS" | awk '{print $1, $3}' | tr ' ' '\n' | sed 's/-[0-9].*//' | sort -u | tr '\n' ' ')
+fi
+
+# Collect packages from blockers
+BLOCKER_PKGS_ALL=""
+if [ -s "$TEMP_BLOCKERS" ]; then
+    BLOCKER_PKGS_ALL=$(cat "$TEMP_BLOCKERS" | sed 's/-[0-9].*//' | sort -u | tr '\n' ' ')
+fi
+
+# Build the NEEDS chain from TREE_DATA
+# NEEDS entries: P|NUM|NEEDS|requirer_base|required_base
+# Follow the chain: A needs B, B needs C → chain is A → B → C
+# The package at the END of the chain with a terminal failure is the root cause
+
+# Find chain endpoints: packages that are NEEDED but don't NEED anything else
+CHAIN_NEEDERS=""   # packages that require something
+CHAIN_NEEDED=""    # packages that are required by something
+if [ -s "$TEMP_TREE_DATA" ]; then
+    CHAIN_NEEDERS=$(grep '|NEEDS|' "$TEMP_TREE_DATA" | cut -d'|' -f4 | sort -u | tr '\n' ' ')
+    CHAIN_NEEDED=$(grep '|NEEDS|' "$TEMP_TREE_DATA" | cut -d'|' -f5 | sort -u | tr '\n' ' ')
+fi
+
+# Chain endpoints = packages that are NEEDED but don't NEED anything themselves
+CHAIN_ENDPOINTS=""
+for needed_pkg in $CHAIN_NEEDED; do
+    IS_NEEDER=0
+    for needer_pkg in $CHAIN_NEEDERS; do
+        if [ "$needed_pkg" = "$needer_pkg" ]; then
+            IS_NEEDER=1
+            break
         fi
     done
-    HELD_BACK_PKGS="$CONFLICT_BASE"
+    if [ "$IS_NEEDER" -eq 0 ]; then
+        CHAIN_ENDPOINTS="$CHAIN_ENDPOINTS $needed_pkg"
+    fi
+done
+
+# Now classify: HOLDING_BACK vs HELD_BACK vs VICTIM
+# HOLDING_BACK: genuinely installed packages that pin versions (from "problem with installed package")
+# CHAIN_ROOT_CAUSE: terminal failure packages at end of dependency chain
+# VICTIM: packages in BLOCKERS that are neither installed blockers nor terminals
+HOLDING_BACK_PKGS=""
+HELD_BACK_PKGS=""
+VICTIM_PKGS=""
+CHAIN_ROOT_CAUSE=""
+
+# Determine the actual root cause packages
+if [ -n "$TERMINAL_PKGS" ]; then
+    # Terminal failures exist - these are the root cause
+    CHAIN_ROOT_CAUSE="$TERMINAL_PKGS"
 fi
+
+# Check installed blockers
+for ipkg in $INSTALLED_BLOCKER_PKGS; do
+    # Installed blocker is a genuine blocker ONLY if it's not also a victim
+    # (i.e., it's not trying to update itself via a terminal failure)
+    IS_TERMINAL=0
+    for tpkg in $TERMINAL_PKGS; do
+        if [ "$ipkg" = "$tpkg" ]; then IS_TERMINAL=1; break; fi
+    done
+    if [ "$IS_TERMINAL" -eq 0 ]; then
+        [ -n "$HOLDING_BACK_PKGS" ] && HOLDING_BACK_PKGS="$HOLDING_BACK_PKGS "
+        HOLDING_BACK_PKGS="$HOLDING_BACK_PKGS$ipkg"
+    fi
+done
+
+# Classify conflict packages
+if [ -n "$CONFLICT_PKGS_ALL" ]; then
+    HELD_BACK_PKGS="$CONFLICT_PKGS_ALL"
+fi
+
+# Classify blocker packages: victim if not an installed blocker and not a terminal
+for bpkg in $BLOCKER_PKGS_ALL; do
+    IS_INSTALLED=0
+    for ipkg in $INSTALLED_BLOCKER_PKGS; do
+        if [ "$bpkg" = "$ipkg" ]; then IS_INSTALLED=1; break; fi
+    done
+    IS_TERMINAL=0
+    for tpkg in $TERMINAL_PKGS; do
+        if [ "$bpkg" = "$tpkg" ]; then IS_TERMINAL=1; break; fi
+    done
+    IS_CONFLICT=0
+    for cpkg in $CONFLICT_PKGS_ALL; do
+        if [ "$bpkg" = "$cpkg" ]; then IS_CONFLICT=1; break; fi
+    done
+    if [ "$IS_INSTALLED" -eq 0 ] && [ "$IS_TERMINAL" -eq 0 ] && [ "$IS_CONFLICT" -eq 0 ]; then
+        VICTIM_PKGS="$VICTIM_PKGS $bpkg"
+    fi
+done
 
 # Generate visual dependency tree for the analysis log
 echo "" >> "$ANALYSIS_LOG"
@@ -529,54 +683,59 @@ echo "" >> "$ANALYSIS_LOG"
 echo "Issue type:" >> "$ANALYSIS_LOG"
 echo "--------------------------------------------------------------------------------" >> "$ANALYSIS_LOG"
 
-# Determine the primary issue type
+# Determine the primary issue type using chain analysis
 if [ "$IS_MODULAR" -eq 1 ] && ([ -s "$TEMP_CONFLICTS" ] || [ -s "$TEMP_BLOCKERS" ]); then
     ISSUE_TYPE="modular_conflict"
     echo "Type: DNF module stream conflict" >> "$ANALYSIS_LOG"
     echo "" >> "$ANALYSIS_LOG"
     echo "Packages from different DNF module streams are conflicting." >> "$ANALYSIS_LOG"
-    echo "This occurs when installed packages belong to one module stream but" >> "$ANALYSIS_LOG"
-    echo "the update requires packages from a different stream." >> "$ANALYSIS_LOG"
     if [ -s "$TEMP_MODULAR" ]; then
         echo "" >> "$ANALYSIS_LOG"
         echo "Detected modular packages:" >> "$ANALYSIS_LOG"
         sort -u "$TEMP_MODULAR" | awk '{printf "  • %s\n", $0}' >> "$ANALYSIS_LOG"
     fi
-elif [ -s "$TEMP_CONFLICTS" ] && [ -s "$TEMP_BLOCKERS" ]; then
-    if [ -n "$HOLDING_BACK_PKGS" ]; then
-        ISSUE_TYPE="version_pin_blocker"
-        echo "Type: Version pin blocker" >> "$ANALYSIS_LOG"
-        echo "" >> "$ANALYSIS_LOG"
-        echo "A package with no update available is pinning old versions and blocking updates." >> "$ANALYSIS_LOG"
-        echo "Blocker: $HOLDING_BACK_PKGS" >> "$ANALYSIS_LOG"
-    else
-        ISSUE_TYPE="circular_dependency"
-        echo "Type: Circular dependency / version conflict lock" >> "$ANALYSIS_LOG"
-        echo "" >> "$ANALYSIS_LOG"
-        echo "Multiple packages have version conflicts that create a circular dependency." >> "$ANALYSIS_LOG"
-        echo "These packages must be upgraded together in a single transaction." >> "$ANALYSIS_LOG"
-    fi
-elif [ -s "$TEMP_CONFLICTS" ]; then
-    ISSUE_TYPE="version_conflict"
-    echo "Type: Version conflict" >> "$ANALYSIS_LOG"
+elif [ -s "$TEMP_DISTUPGRADE" ]; then
+    ISSUE_TYPE="filtered_dependency_gap"
+    echo "Type: Filtered update -- dependency gap" >> "$ANALYSIS_LOG"
     echo "" >> "$ANALYSIS_LOG"
-    echo "Cannot install both old and new versions of the same package simultaneously." >> "$ANALYSIS_LOG"
-elif [ -s "$TEMP_BLOCKERS" ]; then
-    ISSUE_TYPE="blocked_update"
-    echo "Type: Blocked update" >> "$ANALYSIS_LOG"
+    echo "A filtered update (--security, --advisory, or distro-sync) needs packages" >> "$ANALYSIS_LOG"
+    echo "that are NOT included in the filtered transaction scope." >> "$ANALYSIS_LOG"
     echo "" >> "$ANALYSIS_LOG"
-    echo "Packages cannot be updated to their best available versions." >> "$ANALYSIS_LOG"
+    echo "Packages outside the update scope:" >> "$ANALYSIS_LOG"
+    awk -F'|' '{printf "  • %s  (%s)\n", $1, $2}' "$TEMP_DISTUPGRADE" | sort -u >> "$ANALYSIS_LOG"
+elif [ -n "$HOLDING_BACK_PKGS" ] && ([ -s "$TEMP_CONFLICTS" ] || [ -s "$TEMP_BLOCKERS" ]); then
+    # Genuinely installed package with no update is pinning old versions
+    ISSUE_TYPE="version_pin_blocker"
+    echo "Type: Version pin blocker" >> "$ANALYSIS_LOG"
+    echo "" >> "$ANALYSIS_LOG"
+    echo "An installed package with no update is pinning old versions." >> "$ANALYSIS_LOG"
+    echo "Blocker: $HOLDING_BACK_PKGS" >> "$ANALYSIS_LOG"
 elif [ -s "$TEMP_DEPD" ]; then
     ISSUE_TYPE="missing_dependency"
     echo "Type: Missing dependency" >> "$ANALYSIS_LOG"
     echo "" >> "$ANALYSIS_LOG"
     echo "Required packages or libraries are not available in enabled repositories." >> "$ANALYSIS_LOG"
+elif [ -s "$TEMP_CONFLICTS" ] && [ -s "$TEMP_BLOCKERS" ]; then
+    ISSUE_TYPE="circular_dependency"
+    echo "Type: Circular dependency / version conflict" >> "$ANALYSIS_LOG"
+    echo "" >> "$ANALYSIS_LOG"
+    echo "Multiple packages have version conflicts that must resolve together." >> "$ANALYSIS_LOG"
+elif [ -s "$TEMP_CONFLICTS" ]; then
+    ISSUE_TYPE="version_conflict"
+    echo "Type: Version conflict" >> "$ANALYSIS_LOG"
+    echo "" >> "$ANALYSIS_LOG"
+    echo "Cannot install both old and new versions simultaneously." >> "$ANALYSIS_LOG"
+elif [ -s "$TEMP_BLOCKERS" ]; then
+    ISSUE_TYPE="blocked_update"
+    echo "Type: Blocked update" >> "$ANALYSIS_LOG"
+    echo "" >> "$ANALYSIS_LOG"
+    echo "Packages cannot be updated to their best available versions." >> "$ANALYSIS_LOG"
 else
     ISSUE_TYPE="unknown"
     echo "Type: Unknown or no issues detected" >> "$ANALYSIS_LOG"
 fi
 
-# Build blocking chain for circular dependencies and version conflicts
+# Build blocking chain for version conflicts (filtered_dependency_gap has its own chain in stdout)
 if [ "$ISSUE_TYPE" = "modular_conflict" ] || [ "$ISSUE_TYPE" = "circular_dependency" ] || [ "$ISSUE_TYPE" = "version_conflict" ] || [ "$ISSUE_TYPE" = "version_pin_blocker" ]; then
     echo "" >> "$ANALYSIS_LOG"
     echo "" >> "$ANALYSIS_LOG"
@@ -791,13 +950,14 @@ echo "================================"
 PROBLEMS_FOUND=0
 PROBLEM_COUNT=0
 
-if [ -s "$TEMP_DEPD" ] || [ -s "$TEMP_CONFLICTS" ] || [ -s "$TEMP_BLOCKERS" ]; then
+if [ -s "$TEMP_DEPD" ] || [ -s "$TEMP_CONFLICTS" ] || [ -s "$TEMP_BLOCKERS" ] || [ -s "$TEMP_DISTUPGRADE" ]; then
     PROBLEMS_FOUND=1
 fi
 
 # Count problems from log file
 if [ -f "$ANALYSIS_LOG" ]; then
-    PROBLEM_COUNT=$(grep -c "^Problem [0-9]" "$ANALYSIS_LOG" 2>/dev/null || echo "0")
+    PROBLEM_COUNT=$(grep -c "^Problem [0-9]" "$ANALYSIS_LOG" 2>/dev/null)
+    PROBLEM_COUNT=${PROBLEM_COUNT:-0}
 fi
 
 if [ "$PROBLEMS_FOUND" -eq 1 ]; then
@@ -805,78 +965,219 @@ if [ "$PROBLEMS_FOUND" -eq 1 ]; then
     echo "Found $PROBLEM_COUNT dependency problem(s)"
     echo ""
 
-    # Show blocking chain summary for version conflicts
-    if [ "$ISSUE_TYPE" = "modular_conflict" ] || [ "$ISSUE_TYPE" = "circular_dependency" ] || [ "$ISSUE_TYPE" = "version_conflict" ] || [ "$ISSUE_TYPE" = "version_pin_blocker" ]; then
-        echo "Blocking chain:"
-        echo "--------------------"
+    # ================================================================
+    # DEPENDENCY CHAIN DISPLAY
+    # ================================================================
+    # Uses NEEDS chain data to show the actual dependency flow:
+    #   entry_point → intermediate → ... → root_cause (terminal failure)
+    # ================================================================
+
+    echo "Dependency chain:"
+    echo "--------------------"
+    echo ""
+
+    # Helper: walk the NEEDS chain from a starting package to the endpoint
+    # Outputs indented chain lines
+    display_chain_from() {
+        local start_pkg="$1"
+        local indent="$2"
+        local visited="$3"
+
+        # Avoid infinite loops
+        if echo "$visited" | grep -qw "$start_pkg" 2>/dev/null; then
+            return
+        fi
+        visited="$visited $start_pkg"
+
+        # Find what this package needs
+        local next_pkgs=$(grep "|NEEDS|${start_pkg}|" "$TEMP_TREE_DATA" | cut -d'|' -f5 | sort -u)
+        for npkg in $next_pkgs; do
+            # Check what kind of terminal failure this needed package has
+            local is_distupgrade=0
+            local is_missing=0
+            local is_conflict=0
+
+            if [ -s "$TEMP_DISTUPGRADE" ]; then
+                if awk -F'|' '{print $1}' "$TEMP_DISTUPGRADE" | sed 's/-[0-9].*//' | grep -qw "$npkg" 2>/dev/null; then
+                    is_distupgrade=1
+                fi
+            fi
+            if [ -s "$TEMP_DEPD" ]; then
+                if grep -qw "$npkg" "$TEMP_DEPD" 2>/dev/null; then
+                    is_missing=1
+                fi
+            fi
+            if [ -n "$CONFLICT_PKGS_ALL" ]; then
+                for cpkg in $CONFLICT_PKGS_ALL; do
+                    if [ "$npkg" = "$cpkg" ]; then is_conflict=1; break; fi
+                done
+            fi
+
+            # Display this link
+            local suffix=""
+            if [ "$is_distupgrade" -eq 1 ]; then
+                suffix=" ← NOT IN UPDATE SCOPE"
+            elif [ "$is_missing" -eq 1 ]; then
+                suffix=" ← NOT AVAILABLE"
+            elif [ "$is_conflict" -eq 1 ]; then
+                suffix=" ← VERSION CONFLICT"
+            fi
+
+            # Get the requirement text for this link
+            local req_text=$(grep "|NEEDS|${start_pkg}|${npkg}" "$TEMP_TREE_DATA" | head -1)
+            local prob_num=$(echo "$req_text" | cut -d'|' -f2)
+            local display_reqs=$(grep "^P|${prob_num}|REQ|" "$TEMP_TREE_DATA" | cut -d'|' -f4 | grep -i "$npkg" | head -1)
+            if [ -z "$display_reqs" ]; then
+                display_reqs="$npkg"
+            else
+                display_reqs=$(simplify_req "$display_reqs")
+            fi
+
+            echo "${indent}└─ needs $display_reqs${suffix}"
+
+            # Recurse if this package also needs something
+            if [ -z "$suffix" ]; then
+                display_chain_from "$npkg" "${indent}   " "$visited"
+            fi
+        done
+    }
+
+    if [ "$ISSUE_TYPE" = "filtered_dependency_gap" ]; then
+        # Show victims first, then trace to root cause
+        DIST_BASE_PKGS=$(awk -F'|' '{print $1}' "$TEMP_DISTUPGRADE" | sed 's/-[0-9].*//' | sort -u)
+
+        for vpkg in $VICTIM_PKGS; do
+            echo "  $vpkg (wants to update, BLOCKED)"
+            display_chain_from "$vpkg" "  " ""
+        done
+
+        # Show root cause packages that are also in blockers (they want to update too)
+        for tpkg in $DIST_BASE_PKGS; do
+            IS_VICTIM=0
+            for v in $VICTIM_PKGS; do
+                if [ "$tpkg" = "$v" ]; then IS_VICTIM=1; break; fi
+            done
+            if [ "$IS_VICTIM" -eq 0 ]; then
+                IS_IN_BLOCKERS=0
+                for b in $BLOCKER_PKGS_ALL; do
+                    if [ "$tpkg" = "$b" ]; then IS_IN_BLOCKERS=1; break; fi
+                done
+                if [ "$IS_IN_BLOCKERS" -eq 1 ]; then
+                    echo "  $tpkg (wants to update, BLOCKED)"
+                    echo "    └─ NOT IN UPDATE SCOPE (--security/--advisory)"
+                fi
+            fi
+        done
         echo ""
 
         if [ -s "$TEMP_CONFLICTS" ]; then
-            CONFLICT_PKGS=$(cat "$TEMP_CONFLICTS" | awk '{print $1, $3}' | tr ' ' '\n' | sed 's/-[0-9].*//' | sort -u)
+            echo "  Version conflicts (cannot coexist):"
+            cat "$TEMP_CONFLICTS" | sort -u | while IFS= read -r cline; do
+                echo "    • $cline"
+            done
+            echo ""
+        fi
 
-            if [ -n "$HOLDING_BACK_PKGS" ]; then
-                # TRUE BLOCKER scenario
-                for hpkg in $HOLDING_BACK_PKGS; do
-                    echo "Blocker: $hpkg (no update available)"
-                    # Show deduplicated requirements from tree data
-                    HPKG_PROBS=$(grep "^P|.*|ROOT|.*$hpkg" "$TEMP_TREE_DATA" | cut -d'|' -f2 | sort -u)
-                    ALL_REQS=""
-                    for hp in $HPKG_PROBS; do
-                        PREQS=$(grep "^P|${hp}|REQ|" "$TEMP_TREE_DATA" | cut -d'|' -f4)
-                        ALL_REQS="$ALL_REQS
+        DIST_LIST=$(echo $DIST_BASE_PKGS | sed 's/ /, /g')
+        echo "Root cause: $DIST_LIST needs to be updated but is not included"
+        echo "  in the filtered transaction (--security/--advisory/distro-sync)."
+        echo ""
+
+    elif [ "$ISSUE_TYPE" = "version_pin_blocker" ]; then
+        # Genuinely installed blocker holding things back
+        for hpkg in $HOLDING_BACK_PKGS; do
+            echo "  $hpkg (installed, no update available) ← BLOCKER"
+
+            HPKG_PROBS=$(grep "^P|.*|ROOT|.*$hpkg" "$TEMP_TREE_DATA" | cut -d'|' -f2 | sort -u)
+            ALL_REQS=""
+            for hp in $HPKG_PROBS; do
+                PREQS=$(grep "^P|${hp}|REQ|" "$TEMP_TREE_DATA" | cut -d'|' -f4)
+                ALL_REQS="$ALL_REQS
 $PREQS"
-                    done
-                    echo "$ALL_REQS" | sort -u | while IFS= read -r rq; do
-                        [ -z "$rq" ] && continue
-                        echo "  requires $(simplify_req "$rq") (pinned)"
-                    done
-                done
-                echo "  |"
-                echo "Held back:"
-                for pkg in $CONFLICT_PKGS; do
-                    OLD=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $3}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
-                    NEW=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $1}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
-                    if [ -n "$OLD" ] && [ -n "$NEW" ]; then
-                        echo "  • $pkg: $OLD -> $NEW [BLOCKED]"
-                    fi
-                done
-
-                echo ""
-                HELD_LIST=""
-                for hp in $CONFLICT_PKGS; do
-                    [ -n "$HELD_LIST" ] && HELD_LIST="$HELD_LIST, "
-                    HELD_LIST="$HELD_LIST$hp"
-                done
-                BLOCKER_LIST=""
-                for hp in $HOLDING_BACK_PKGS; do
-                    [ -n "$BLOCKER_LIST" ] && BLOCKER_LIST="$BLOCKER_LIST, "
-                    BLOCKER_LIST="$BLOCKER_LIST$hp"
-                done
-                echo "Root cause: $BLOCKER_LIST has no update and is holding back $HELD_LIST"
-            else
-                # Genuine circular dependency
-                echo "Interdependent packages:"
-                for pkg in $CONFLICT_PKGS; do
-                    OLD=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $3}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
-                    NEW=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $1}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
-                    if [ -n "$OLD" ] && [ -n "$NEW" ]; then
-                        BLOCKED=""
-                        if grep -q "^$pkg-" "$TEMP_BLOCKERS" 2>/dev/null; then
-                            BLOCKED=" [HELD BACK]"
-                        fi
-                        echo "  • $pkg: $OLD -> $NEW$BLOCKED"
-                    fi
-                done
-                echo ""
-                if [ "$ISSUE_TYPE" = "modular_conflict" ]; then
-                    echo "Root cause: DNF module stream conflict"
-                    echo "  Installed packages belong to one module stream but repos have a newer stream."
-                    echo "  Use 'dnf module list' and 'dnf module reset' to resolve."
-                else
-                    echo "Root cause: Circular dependency lock"
-                    echo "  All packages must upgrade together in one transaction"
+            done
+            echo "$ALL_REQS" | sort -u | while IFS= read -r rq; do
+                [ -z "$rq" ] && continue
+                echo "    └─ requires $(simplify_req "$rq") (version pin)"
+            done
+        done
+        echo "  |"
+        echo "  Held back:"
+        if [ -n "$HELD_BACK_PKGS" ]; then
+            for pkg in $HELD_BACK_PKGS; do
+                OLD=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $3}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
+                NEW=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $1}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
+                if [ -n "$OLD" ] && [ -n "$NEW" ]; then
+                    echo "    • $pkg: $OLD -> $NEW [BLOCKED]"
                 fi
+            done
+        fi
+        echo ""
+
+        BLOCKER_LIST=$(echo $HOLDING_BACK_PKGS | sed 's/ /, /g')
+        HELD_LIST=$(echo $HELD_BACK_PKGS | sed 's/ /, /g')
+        echo "Root cause: $BLOCKER_LIST has no update and is pinning $HELD_LIST"
+        echo ""
+
+    elif [ "$ISSUE_TYPE" = "modular_conflict" ]; then
+        # Use the existing modular display but with chain context
+        if [ -n "$HOLDING_BACK_PKGS" ]; then
+            for hpkg in $HOLDING_BACK_PKGS; do
+                echo "  $hpkg (installed, no update) ← BLOCKER"
+                display_chain_from "$hpkg" "  " ""
+            done
+            echo "  |"
+            echo "  Held back:"
+            for pkg in $HELD_BACK_PKGS; do
+                OLD=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $3}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
+                NEW=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $1}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
+                if [ -n "$OLD" ] && [ -n "$NEW" ]; then
+                    echo "    • $pkg: $OLD -> $NEW [BLOCKED]"
+                fi
+            done
+        else
+            if [ -n "$CONFLICT_PKGS_ALL" ]; then
+                for pkg in $CONFLICT_PKGS_ALL; do
+                    OLD=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $3}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
+                    NEW=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $1}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
+                    if [ -n "$OLD" ] && [ -n "$NEW" ]; then
+                        echo "  • $pkg: $OLD -> $NEW"
+                    fi
+                done
             fi
+        fi
+        echo ""
+        echo "Root cause: DNF module stream conflict"
+        echo "  Packages belong to one module stream but repos have a newer stream."
+        echo ""
+
+    elif [ "$ISSUE_TYPE" = "circular_dependency" ] || [ "$ISSUE_TYPE" = "version_conflict" ]; then
+        if [ -n "$CONFLICT_PKGS_ALL" ]; then
+            for pkg in $CONFLICT_PKGS_ALL; do
+                OLD=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $3}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
+                NEW=$(grep "^$pkg-" "$TEMP_CONFLICTS" | head -1 | awk '{print $1}' | sed 's/.*-\([0-9][^-]*-[0-9][^.]*\)\..*/\1/' 2>/dev/null)
+                BLOCKED=""
+                if echo "$BLOCKER_PKGS_ALL" | grep -qw "$pkg" 2>/dev/null; then
+                    BLOCKED=" [HELD BACK]"
+                fi
+                echo "  • $pkg: $OLD -> $NEW$BLOCKED"
+                display_chain_from "$pkg" "  " ""
+            done
+        fi
+        echo ""
+        echo "Root cause: Version conflict -- packages must upgrade together"
+        echo ""
+
+    elif [ "$ISSUE_TYPE" = "missing_dependency" ]; then
+        # Show what's missing and who needs it
+        if [ -s "$TEMP_DEPD" ]; then
+            cat "$TEMP_DEPD" | sort -u | while IFS= read -r dep; do
+                echo "  MISSING: $dep"
+            done
+            echo "  |"
+            AFFECTED=$(cat "$TEMP_FAILPKG" | grep -v "^--$" | grep -v "^$" | sed 's/-[0-9].*//' | sort -u)
+            for apkg in $AFFECTED; do
+                echo "  └─ blocks: $apkg"
+            done
         fi
         echo ""
     fi
@@ -1107,9 +1408,65 @@ $PREQS"
                 echo ""
             fi
         fi
+
+    elif [ "$ISSUE_TYPE" = "filtered_dependency_gap" ]; then
+        DIST_BASE_PKGS=$(awk -F'|' '{print $1}' "$TEMP_DISTUPGRADE" | sed 's/-[0-9].*//' | sort -u)
+        DIST_FULL_PKGS=$(awk -F'|' '{print $1}' "$TEMP_DISTUPGRADE" | sort -u | tr '\n' ' ')
+        BLOCKED_PKGS=""
+        if [ -s "$TEMP_BLOCKERS" ]; then
+            BLOCKED_PKGS=$(cat "$TEMP_BLOCKERS" | sed 's/-[0-9].*//' | sort -u | tr '\n' ' ')
+        fi
+
+        echo "STEP 1: Confirm whether --security or --advisory was used"
+        echo "-----------------------------------------------------------"
+        echo "dnf history info last"
+        echo "# Look for 'Command Line' to see if --security/--advisory was passed"
+        echo ""
+
+        echo "STEP 2: Check if the dependency packages have updates available"
+        echo "----------------------------------------------------------------"
+        for dpkg in $DIST_BASE_PKGS; do
+            echo "yum list --showduplicates $dpkg"
+        done
+        echo ""
+
+        echo "STEP 3: Check for advisories on the dependency packages"
+        echo "--------------------------------------------------------"
+        for dpkg in $DIST_BASE_PKGS; do
+            echo "dnf updateinfo list --installed $dpkg"
+        done
+        echo ""
+
+        echo "================================"
+        echo "POSSIBLE SOLUTIONS"
+        echo "================================"
+        echo ""
+
+        DIST_LIST=$(echo $DIST_BASE_PKGS | tr ' ' ', ')
+
+        echo "Option 1 (RECOMMENDED): Update the dependency packages first, then retry"
+        echo "--------------------------------------------------------------------------"
+        echo "  yum update $DIST_BASE_PKGS"
+        echo "  yum update --security"
+        echo ""
+
+        echo "Option 2: Run a full update instead of filtered"
+        echo "-------------------------------------------------"
+        echo "  yum update"
+        echo "  # This pulls in all available updates including dependencies"
+        echo ""
+
+        I686_PKGS=$(awk -F'|' '/\.i686/{print $1}' "$TEMP_DISTUPGRADE" | sed 's/-[0-9].*/.i686/' | sort -u | tr '\n' ' ')
+        if [ -n "$I686_PKGS" ]; then
+            echo "Option 3: Remove unneeded multilib (i686) packages"
+            echo "----------------------------------------------------"
+            echo "  dnf remove $I686_PKGS"
+            echo "  # Then retry: yum update --security"
+            echo ""
+        fi
     fi
 else
-    echo "No dependency problems found in yumlog.txt"
+    echo "No dependency problems found in $LOGFILE"
     echo ""
     echo "The log file may not contain dependency errors, or they are already resolved."
 fi
@@ -1121,7 +1478,7 @@ echo "================================"
 echo ""
 
 # Clean up all temporary files (ensure cleanup happens regardless of errors)
-rm -f "$TEMP_FAILPKG" "$TEMP_DEPD" "$TEMP_CONFLICTS" "$TEMP_BLOCKERS" "$TEMP_OBSOLETES" "$TEMP_MODULAR" "$TEMP_TREE_DATA" 2>/dev/null
+rm -f "$TEMP_FAILPKG" "$TEMP_DEPD" "$TEMP_CONFLICTS" "$TEMP_BLOCKERS" "$TEMP_OBSOLETES" "$TEMP_MODULAR" "$TEMP_DISTUPGRADE" "$TEMP_TREE_DATA" 2>/dev/null
 rm -f /tmp/yumlist_output.txt 2>/dev/null
 
 # Clean up other temp files if they exist

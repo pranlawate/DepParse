@@ -13,7 +13,9 @@ Analyzes `package-cleanup --problems` output to identify version mismatches and 
 Investigates why specific packages cannot be upgraded.
 
 ## Features
-- ✅ **True root cause identification** - distinguishes blocker packages (no update) from held-back packages (have updates)
+- ✅ **Chain-traced root cause** - follows the dependency chain to find the ACTUAL blocking package, not what DNF blames
+- ✅ **Inverted-log correction** - DNF logs blame the top-level package; DepParse traces downstream to the real failure point
+- ✅ **Filtered update detection** - identifies `--security`/`--advisory` dependency gaps (`does not belong to a distupgrade repository`)
 - ✅ **Visual dependency tree** - per-problem tree with blocker labels, version pins, and cause-effect summary
 - ✅ **Modular conflict detection** - identifies RHEL 8/9 DNF module stream conflicts
 - ✅ Parses complete dependency chains including "requires" relationships
@@ -24,8 +26,9 @@ Investigates why specific packages cannot be upgraded.
 - ✅ Prioritized troubleshooting - recommends removing the true blocker first
 - ✅ Organizes output by problem number for easy navigation
 - ✅ Optional repository queries with `--run-queries` flag
+- ✅ Accepts custom log file path as argument (default: `yumlog.txt`)
 - ✅ **Single comprehensive log file** - all analysis in one place
-- ✅ Clean stdout summary with issue type, blocking chain, and troubleshooting steps
+- ✅ Clean stdout summary with issue type, dependency chain, and troubleshooting steps
 
 ## Quick Start
 
@@ -33,55 +36,66 @@ Investigates why specific packages cannot be upgraded.
    ```bash
    dnf update 2>&1 | tee yumlog.txt
    ```
-2. Place the `yumlog.txt` in the same directory as `yumlooper.sh` and run:
+2. Run the analyzer (pass the log file as an argument, or default to `yumlog.txt`):
    ```bash
-   ./yumlooper.sh
+   ./yumlooper.sh yumlog.txt
    ```
 3. Review the analysis, send the troubleshooting commands to the customer, and iterate
 
 ## Usage
 
 ```bash
-./yumlooper.sh              # Analysis only (default) - shows issue type + troubleshooting steps
-./yumlooper.sh --run-queries  # Also queries yum/dnf repos on THIS server
-./yumlooper.sh -v           # Verbose mode (reserved for future use)
-./yumlooper.sh --help       # Show help
+./yumlooper.sh                         # Reads yumlog.txt in current dir
+./yumlooper.sh /path/to/logfile.txt    # Reads specified log file
+./yumlooper.sh logfile.txt --run-queries  # Also queries yum/dnf repos on THIS server
+./yumlooper.sh -v                      # Verbose mode (reserved for future use)
+./yumlooper.sh --help                  # Show help
 ```
 
 ## Output
 
 ### Standard Output (stdout)
-Shows the issue type, blocking chain with true blocker identification, and prioritized troubleshooting:
-```
-================================
-ANALYSIS COMPLETE
-================================
-Issue Type: modular_conflict
-Found 2 dependency problem(s)
+Shows the issue type, traced dependency chain, root cause, and prioritized troubleshooting.
 
-BLOCKING CHAIN:
+**Example 1: Installed package pinning versions (modular conflict)**
+```
+Issue Type: modular_conflict
+
+Dependency chain:
 --------------------
 
-TRUE BLOCKER: ant-javamail (no update available)
-  requires ant = 1.10.5 (pinned)
-  requires mvn(org.apache.ant:ant) = 1.10.5 (pinned)
+  ant-javamail (installed, no update) ← BLOCKER
+  └─ needs ant = 1.10.5 ← VERSION CONFLICT
+  └─ needs mvn(org.apache.ant:ant) = 1.10.5
   |
-HELD BACK:
-  • ant: 1.10.5-1 -> 1.10.9-1 [BLOCKED]
-  • ant-lib: 1.10.5-1 -> 1.10.9-1 [BLOCKED]
+  Held back:
+    • ant: 1.10.5-1 -> 1.10.9-1 [BLOCKED]
+    • ant-lib: 1.10.5-1 -> 1.10.9-1 [BLOCKED]
 
-ROOT CAUSE: ant-javamail has no update and is holding back ant, ant-lib
-
-================================
-POSSIBLE SOLUTIONS
-================================
-
-Option 1 (RECOMMENDED): Remove the blocker package, then update
-  # ant-javamail has no update -- removing it unblocks ant, ant-lib
-  dnf remove ant-javamail
-  dnf update
-...
+Root cause: DNF module stream conflict
 ```
+
+**Example 2: Filtered update (`--security`) dependency gap**
+```
+Issue Type: filtered_dependency_gap
+
+Dependency chain:
+--------------------
+
+  sssd-ipa (wants to update, BLOCKED)
+  └─ needs samba-client-libs >= 4.19.4
+     └─ needs samba-common-libs = 4.19.4 ← NOT IN UPDATE SCOPE
+  samba-common-libs (wants to update, BLOCKED)
+    └─ NOT IN UPDATE SCOPE (--security/--advisory)
+
+Root cause: samba-common-libs needs to be updated but is not included
+  in the filtered transaction (--security/--advisory/distro-sync).
+
+Option 1 (RECOMMENDED): Update the dependency packages first, then retry
+  yum update samba-common-libs
+  yum update --security
+```
+DNF blames `sssd-ipa` in the log. DepParse traces the chain and identifies `samba-common-libs` as the actual root cause.
 
 ### Analysis Log File: `depparse_analysis.log`
 A single comprehensive file containing:
@@ -101,7 +115,7 @@ A single comprehensive file containing:
          └── -> ant, ant-lib held back by ant-javamail-1.10.5
    ```
 
-2. **ISSUE TYPE ANALYSIS** - Detected issue classification (modular conflict, circular dependency, version conflict, missing dependency, blocked update)
+2. **ISSUE TYPE ANALYSIS** - Detected issue classification (modular conflict, version pin blocker, filtered dependency gap, circular dependency, missing dependency, blocked update)
 
 3. **BLOCKING CHAIN ANALYSIS** - Identifies true blockers (no update available) vs held-back packages (have updates), with root cause explanation
 
@@ -118,15 +132,27 @@ less depparse_analysis.log
 
 ## What It Parses
 
-- `problem with installed package` - Identifies problematic packages
+- `problem with installed package` - Genuinely installed blockers (version pins)
 - `nothing provides <dependency>` - Root cause missing dependencies
-- `but none of the providers can be installed` - Blocked dependency providers
-- `package X requires Y` - Dependency chain relationships
+- `but none of the providers can be installed` - Blocked dependency providers (chain edges)
+- `package X requires Y` - Dependency chain relationships (traced to terminal failure)
+- `does not belong to a distupgrade repository` - Filtered update dependency gaps (`--security`/`--advisory`)
 - `cannot install both X and Y` - Version conflicts between old and new packages
-- `cannot install the best update candidate` - Blocked package updates
+- `cannot install the best update candidate` - Victims of broken dependency chains
 - `obsoletes` - Package replacement relationships
 - `module+el` version strings - DNF module stream conflicts (RHEL 8/9)
 - Repository queries via `yum whatprovides` (with `--run-queries`) - Available package versions
+
+### Issue Types
+
+| Type | Root Cause | Typical Fix |
+|------|-----------|-------------|
+| `modular_conflict` | Installed package pins module stream | `dnf module reset` or remove blocker |
+| `version_pin_blocker` | Installed package with no update holds back others | Remove the blocker, then update |
+| `filtered_dependency_gap` | `--security`/`--advisory` excludes needed deps | Update deps separately, then retry |
+| `missing_dependency` | Required package not in any enabled repo | Enable repo or install missing dep |
+| `circular_dependency` | Packages must upgrade together | `dnf update --allowerasing` |
+| `blocked_update` | Best candidate can't install | Check excludes, version locks |
 
 ## Package Version Mismatch Analysis (cleanup_analyzer.sh)
 
